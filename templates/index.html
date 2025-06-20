@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Telegram Web Interface</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f7f9;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 700px;
+            margin: 50px auto;
+            padding: 30px;
+            background-color: #ffffff;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            border-radius: 10px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #333333;
+        }
+
+        form {
+            margin-top: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555555;
+        }
+
+        select, input[type="text"], input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #dddddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin-right: 10px;
+            border: none;
+            background-color: #007BFF;
+            color: white;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            padding: 12px;
+            margin-bottom: 20px;
+            border: 1px solid #c3e6cb;
+            border-radius: 5px;
+        }
+
+        .messages {
+            margin-top: 30px;
+        }
+
+        .messages h2 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .messages ul {
+            list-style: none;
+            padding: 0;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #dddddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+
+        .messages li {
+            padding: 10px;
+            border-bottom: 1px solid #eeeeee;
+        }
+
+        .messages li:last-child {
+            border-bottom: none;
+        }
+    </style>
+
+    <script>
+    let currentChat = null;
+
+ async function refreshMessages() {
+    if (!currentChat) return;
+    const response = await fetch(`/messages/${currentChat}`);
+    const data = await response.json();
+
+    const msgList = document.getElementById("message-list");
+    msgList.innerHTML = "";
+
+    for (let msg of data.messages) {
+        const li = document.createElement("li");
+
+        if (msg.type === "text") {
+            li.textContent = msg.content;
+        } else if (msg.type === "image") {
+            li.innerHTML = `${msg.sender}:<br><img src="/media/${msg.filename}" style="max-width: 100%; max-height: 300px;">`;
+        } else if (msg.type === "video") {
+            li.innerHTML = `${msg.sender}:<br>
+                <video controls style="max-width: 100%; max-height: 300px;">
+                    <source src="/media/${msg.filename}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>`;
+        } else if (msg.type === "audio") {
+            li.innerHTML = `${msg.sender}:<br>
+                <audio controls>
+                    <source src="/media/${msg.filename}" type="audio/mpeg">
+                    Your browser does not support the audio tag.
+                </audio>`;
+        } else if (msg.type === "file") {
+            li.innerHTML = `${msg.sender}: 📎 <a href="/media/${msg.filename}" target="_blank" rel="noopener noreferrer">${msg.filename}</a>`;
+        }
+
+        msgList.appendChild(li);
+    }
+}
+
+
+    function setChat(chatId) {
+        currentChat = chatId;
+        document.querySelector('input[name="chat_id"][type="hidden"]').value = chatId;
+        refreshMessages();
+    }
+
+    setInterval(refreshMessages, 5000);
+
+    async function uploadFile(event) {
+        event.preventDefault();
+        const form = document.getElementById("file-form");
+        const formData = new FormData(form);
+        const response = await fetch("/upload", {
+            method: "POST",
+            body: formData
+        });
+        if (response.ok) {
+            alert("File sent!");
+            refreshMessages();
+            form.reset();
+        }
+    }
+</script>
+</head>
+<body>
+    <div class="container">
+        <p style="text-align: right;">
+    <a href="/files" target="_blank">📁 View All Media Files</a>
+</p>
+
+        <h1>Telegram Chat Manager</h1>
+
+        {% if success %}
+            <div class="success">Message sent successfully!</div>
+        {% endif %}
+
+        <form method="post">
+            <label for="chat_id">Select Chat:</label>
+            <select name="chat_id" onchange="setChat(this.value)" required>
+                {% for id, name in dialogs %}
+                    <option value="{{ id }}"
+                        {% if id == active_chat %}
+                            selected
+                        {% endif %}
+                    >{{ name }}</option>
+                {% endfor %}
+            </select>
+
+            <label for="message">Message:</label>
+            <input type="text" name="message" placeholder="Enter your message...">
+            <div>
+                <button type="submit">Send Message</button>
+                <button type="submit" name="read" value="1">Read Last 10 Messages</button>
+            </div>
+        </form>
+
+        <form id="file-form" onsubmit="uploadFile(event)">
+            <input type="hidden" name="chat_id" value="{{ active_chat or '' }}">
+            <label>Send File:</label>
+            <input type="file" name="file" required>
+            <button type="submit">Upload</button>
+        </form>
+
+        <div class="messages">
+            <h2>Recent Messages</h2>
+            <ul id="message-list">
+                {% for msg in messages %}
+                    <li>{{ msg }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
