@@ -1,5 +1,6 @@
 import os
 import base64
+import json
 from io import BytesIO
 from fastapi import FastAPI, Request, HTTPException, Form, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -9,7 +10,7 @@ from telethon import TelegramClient
 from telethon.tl.types import Chat, Channel, DocumentAttributeVideo, DocumentAttributeFilename, MessageMediaPhoto, \
     DocumentAttributeAudio, MessageMediaDocument
 from telethon.events import NewMessage
-from telethon.errors import SessionPasswordNeededError, ChatAdminRequiredError
+from telethon.errors import SessionPasswordNeededError, ChatAdminRequiredError, FloodWaitError
 from telethon.tl.functions.channels import GetParticipantsRequest
 from telethon.tl.types import ChannelParticipantsSearch
 from dotenv import load_dotenv
@@ -49,6 +50,32 @@ _groups_cache = None
 _profile_photo_cache = {}
 _media_cache_dir = "media_cache"
 os.makedirs(_media_cache_dir, exist_ok=True)
+_selected_chat_file = "selected_chat.json"
+
+
+# Save selected chat to file
+def save_selected_chat(chat_id: int):
+    try:
+        with open(_selected_chat_file, "w") as f:
+            json.dump({"chat_id": chat_id}, f)
+        logger.info(f"Saved selected chat_id {chat_id} to {_selected_chat_file}")
+    except Exception as e:
+        logger.error(f"Error saving selected chat: {e}")
+
+
+# Load selected chat from file
+def load_selected_chat() -> int | None:
+    try:
+        if os.path.exists(_selected_chat_file):
+            with open(_selected_chat_file, "r") as f:
+                data = json.load(f)
+                chat_id = data.get("chat_id")
+                logger.info(f"Loaded selected chat_id {chat_id} from {_selected_chat_file}")
+                return chat_id
+        return None
+    except Exception as e:
+        logger.error(f"Error loading selected chat: {e}")
+        return None
 
 
 async def get_group_chats():
@@ -153,26 +180,45 @@ async def download_profile_photo(user_id: int, semaphore: asyncio.Semaphore):
             return None
 
 
-# Helper: Download media with disk caching
-async def download_media(message, thumbnail_only: bool = False):
+# Helper: Download media with disk caching and retry on FloodWaitError
+async def download_media(message, thumbnail_only: bool = False, retries: int = 3):
     media_type = message.media.__class__.__name__
     media_id = f"{message.id}_{media_type}"
     cache_file = os.path.join(_media_cache_dir, f"{hashlib.md5(media_id.encode()).hexdigest()}.bin")
 
     if os.path.exists(cache_file):
-        logger.debug(f"Returning cached media {media_id}")
-        with open(cache_file, "rb") as f:
-            media_bytes = BytesIO(f.read())
-    else:
-        media_bytes = await client.download_media(message.media, file=BytesIO(), thumb=thumbnail_only)
-        if media_bytes.getbuffer().nbytes > 10 * 1024 * 1024:  # Limit to 10 MB
-            logger.warning(f"Media {media_id} too large, skipping")
-            raise ValueError("Media too large")
-        with open(cache_file, "wb") as f:
-            f.write(media_bytes.getvalue())
-        logger.debug(f"Cached media {media_id} to disk")
+        try:
+            with open(cache_file, "rb") as f:
+                media_bytes = BytesIO(f.read())
+            # Verify file integrity
+            if media_bytes.getbuffer().nbytes == 0:
+                logger.warning(f"Cached media {media_id} is empty, re-downloading")
+                os.remove(cache_file)
+            else:
+                logger.debug(f"Returning cached media {media_id}")
+                return media_bytes, media_type
+        except Exception as e:
+            logger.warning(f"Error reading cached media {media_id}: {e}")
+            os.remove(cache_file)
 
-    return media_bytes, media_type
+    for attempt in range(retries):
+        try:
+            media_bytes = await client.download_media(message.media, file=BytesIO(), thumb=thumbnail_only)
+            if media_bytes.getbuffer().nbytes > 10 * 1024 * 1024:  # Limit to 10 MB
+                logger.warning(f"Media {media_id} too large, skipping")
+                raise ValueError("Media too large")
+            with open(cache_file, "wb") as f:
+                f.write(media_bytes.getvalue())
+            logger.debug(f"Cached media {media_id} to disk")
+            return media_bytes, media_type
+        except FloodWaitError as e:
+            logger.warning(f"FloodWaitError for media {media_id}, waiting {e.seconds} seconds")
+            await asyncio.sleep(e.seconds)
+        except Exception as e:
+            logger.warning(f"Error downloading media {media_id} (attempt {attempt + 1}/{retries}): {e}")
+            if attempt == retries - 1:
+                raise
+            await asyncio.sleep(1)
 
 
 # Helper: List last messages from group chats with filters and detailed user info
@@ -286,7 +332,9 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset_id: int = 0, thum
         logger.info(f"Fetching media for chat {chat_id} with limit {limit}, offset {offset_id}")
         clean_media_cache()  # Clean old media files
         media_files = []
-        async for msg in client.iter_messages(chat_id, limit=limit + 1, offset_id=offset_id, filter=None):
+        messages_scanned = 0
+        async for msg in client.iter_messages(chat_id, limit=limit * 10, offset_id=offset_id, filter=None):
+            messages_scanned += 1
             if msg.media:
                 sender = await msg.get_sender()
                 user_info = {
@@ -363,7 +411,7 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset_id: int = 0, thum
             if len(media_files) >= limit:
                 break
         next_offset_id = media_files[-1]["id"] if media_files and len(media_files) == limit else None
-        logger.info(f"Fetched {len(media_files)} media files for chat {chat_id}")
+        logger.info(f"Fetched {len(media_files)} media files for chat {chat_id}, scanned {messages_scanned} messages")
         return {"media_files": media_files[:limit], "next_offset_id": next_offset_id}
     except Exception as e:
         logger.error(f"Error fetching media for chat {chat_id}: {e}")
@@ -391,6 +439,7 @@ async def handle_message(event):
 @app.get("/reset-chat", response_class=RedirectResponse)
 async def reset_chat(request: Request):
     request.session.pop("chat_id", None)
+    save_selected_chat(None)  # Clear saved chat
     logger.info("Chat selection reset")
     return RedirectResponse(url="/", status_code=303)
 
@@ -404,12 +453,22 @@ async def form(
         start_date: str = None,
         end_date: str = None,
         offset_id: int = Query(default=0, ge=0),
-        limit: int = Query(default=10, ge=1, le=100),
+        limit: int = Query(default=20, ge=1, le=100),
         tab: str = Query(default="messages")
 ):
     logger.info(f"Handling request for tab {tab}, chat_id {chat_id}, offset {offset_id}, limit {limit}")
+
+    # Load saved chat_id if none provided and none in session
+    if chat_id is None and "chat_id" not in request.session:
+        saved_chat_id = load_selected_chat()
+        if saved_chat_id is not None:
+            request.session["chat_id"] = saved_chat_id
+            chat_id = saved_chat_id
+
+    # Update selected chat if a new one is provided
     if chat_id is not None:
         request.session["chat_id"] = chat_id
+        save_selected_chat(chat_id)
     elif "chat_id" in request.session:
         chat_id = request.session["chat_id"]
 
@@ -419,6 +478,7 @@ async def form(
         if chat_id not in valid_chat_ids:
             logger.warning(f"Invalid chat_id {chat_id}, resetting session")
             request.session.pop("chat_id", None)
+            save_selected_chat(None)
             chat_id = None
 
     messages = []
@@ -426,6 +486,8 @@ async def form(
     users_data = {"users": [], "next_offset_id": offset_id, "error": None}
     media_files = []
     media_next_offset_id = offset_id
+
+    # Process data only for the selected chat
     if chat_id:
         if tab == "messages":
             result = await get_last_messages(chat_id, limit=limit, offset_id=offset_id, query=query,
@@ -440,6 +502,7 @@ async def form(
             result = await get_chat_media(chat_id, limit=limit, offset_id=offset_id, thumbnail_only=True)
             media_files = result["media_files"]
             media_next_offset_id = result["next_offset_id"]
+
     logger.info(
         f"Rendering template for tab {tab} with {len(messages)} messages, {len(users_data['users'])} users, {len(media_files)} media files")
     return templates.TemplateResponse("index.html", {
