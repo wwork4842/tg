@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Authorize Telegram</title>
+    <style>
+        body { background-color: #1a1a1a; color: #fff; font-family: Arial, sans-serif; }
+        .container { max-width: 500px; margin: 50px auto; text-align: center; }
+        input, button { padding: 10px; margin: 10px; border: none; border-radius: 5px; }
+        button { background-color: #1e90ff; color: #fff; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Enter Telegram Authorization Code</h1>
+        <form method="post" action="/authorize">
+            <input type="text" name="code" placeholder="Enter code" required>
+            <button type="submit">Authorize</button>
+        </form>
+    </div>
+</body>
+</html>

@@ -14,6 +14,12 @@ from telethon.tl.types import ChannelParticipantsSearch
 from dotenv import load_dotenv
 from datetime import datetime
 import mimetypes
+import asyncio
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 # Load credentials from .env
 load_dotenv()
@@ -27,6 +33,26 @@ app.add_middleware(SessionMiddleware, secret_key="your-secret-key")
 templates = Jinja2Templates(directory="templates")
 started = False
 
+# Cache for group chats
+_groups_cache = None
+
+async def get_group_chats():
+    global _groups_cache
+    if _groups_cache is not None:
+        return _groups_cache
+    try:
+        groups = []
+        async for dialog in client.iter_dialogs():
+            entity = dialog.entity
+            if isinstance(entity, (Channel, Chat)) and not entity.creator and not entity.left:
+                name = f"{dialog.name} (@{entity.username})" if entity.username else dialog.name
+                groups.append(
+                    {"id": dialog.id, "name": name, "type": "channel" if isinstance(entity, Channel) else "group"})
+        _groups_cache = groups
+        return groups
+    except Exception as e:
+        logger.error(f"Error fetching groups: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch group chats")
 
 # Startup
 @app.on_event("startup")
@@ -40,9 +66,8 @@ async def startup_event():
                 raise HTTPException(status_code=307, detail="Redirect to /authorize")
             started = True
     except Exception as e:
-        print(f"Startup error: {e}")
+        logger.error(f"Startup error: {e}")
         raise HTTPException(status_code=500, detail="Failed to initialize Telegram client")
-
 
 # Authorization endpoint
 @app.post("/authorize")
@@ -55,34 +80,27 @@ async def authorize(code: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Authorization failed: {e}")
 
-
 @app.get("/authorize", response_class=HTMLResponse)
 async def authorize_form(request: Request):
     return templates.TemplateResponse("authorize.html", {"request": request})
 
-
-# Helper: List group chats (including supergroups and channels)
-async def get_group_chats():
+# Helper: Download profile photo
+async def download_profile_photo(user_id: int):
     try:
-        groups = []
-        async for dialog in client.iter_dialogs():
-            entity = dialog.entity
-            if isinstance(entity, (Channel, Chat)) and not entity.creator and not entity.left:
-                name = f"{dialog.name} (@{entity.username})" if entity.username else dialog.name
-                groups.append(
-                    {"id": dialog.id, "name": name, "type": "channel" if isinstance(entity, Channel) else "group"})
-        return groups
+        photo_file = await client.download_profile_photo(user_id, file=BytesIO())
+        if photo_file:
+            return f"data:image/jpeg;base64,{base64.b64encode(photo_file.getvalue()).decode('utf-8')}"
+        return None
     except Exception as e:
-        print(f"Error fetching groups: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch group chats")
-
+        logger.warning(f"Error downloading profile photo for user {user_id}: {e}")
+        return None
 
 # Helper: List last messages from group chats with filters and detailed user info
-async def get_last_messages(chat_id: int, limit: int = 100, offset: int = 0, query: str = None, start_date: str = None,
-                            end_date: str = None):
+async def get_last_messages(chat_id: int, limit: int = 10, offset_id: int = 0, query: str = None,
+                            start_date: str = None, end_date: str = None):
     try:
         messages = []
-        async for msg in client.iter_messages(chat_id, limit=limit, offset_id=offset):
+        async for msg in client.iter_messages(chat_id, limit=limit, offset_id=offset_id):
             if msg.text or msg.media:
                 if query and query.lower() not in (msg.text or "").lower():
                     continue
@@ -95,20 +113,24 @@ async def get_last_messages(chat_id: int, limit: int = 100, offset: int = 0, que
                     if end and msg_date > end:
                         continue
                 sender = await msg.get_sender()
+                profile_photo = None
+                if sender and hasattr(sender, 'id'):
+                    profile_photo = await download_profile_photo(sender.id)
                 user_info = {
                     "id": sender.id if sender else "Unknown",
                     "first_name": getattr(sender, "first_name", "Unknown"),
                     "last_name": getattr(sender, "last_name", ""),
                     "username": getattr(sender, "username", "No username"),
-                    "phone": getattr(sender, "phone", "Hidden")
+                    "phone": getattr(sender, "phone", "Hidden"),
+                    "profile_photo": profile_photo
                 }
                 content = msg.text if msg.text else f"[Media: {msg.media.__class__.__name__}]"
                 messages.append({"content": content, "date": msg.date, "id": msg.id, "user": user_info})
-        return messages
+        next_offset_id = messages[-1]["id"] if messages else offset_id
+        return {"messages": messages, "next_offset_id": next_offset_id}
     except Exception as e:
-        print(f"Error fetching messages: {e}")
+        logger.error(f"Error fetching messages: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch messages")
-
 
 # Helper: List all users in a chat with proper pagination
 async def get_chat_users(chat_id: int, limit: int = 100, offset: int = 0):
@@ -120,44 +142,56 @@ async def get_chat_users(chat_id: int, limit: int = 100, offset: int = 0):
                 channel=entity,
                 filter=ChannelParticipantsSearch(''),
                 offset=offset,
-                limit=limit,
+                limit=limit + 1,  # Запитуємо на одного більше, щоб перевірити, чи є наступна сторінка
                 hash=0
             ))
-            for user in participants.users:
+            photo_tasks = [download_profile_photo(user.id) for user in participants.users[:limit]]
+            profile_photos = await asyncio.gather(*photo_tasks, return_exceptions=True)
+            for user, profile_photo in zip(participants.users[:limit], profile_photos):
                 user_info = {
                     "id": user.id,
                     "first_name": getattr(user, "first_name", "Unknown"),
                     "last_name": getattr(user, "last_name", ""),
                     "username": getattr(user, "username", "No username"),
-                    "phone": getattr(user, "phone", "Hidden")
+                    "phone": getattr(user, "phone", "Hidden"),
+                    "profile_photo": profile_photo if isinstance(profile_photo, str) else None
                 }
                 users.append(user_info)
+            has_next = len(participants.users) > limit
+            next_offset_id = offset + len(users) if has_next else None
         else:
-            async for user in client.iter_participants(chat_id, limit=limit):
+            count = 0
+            async for user in client.iter_participants(chat_id, limit=limit + 1):
                 if offset > 0:
                     offset -= 1
                     continue
+                if count >= limit:
+                    break
+                profile_photo = await download_profile_photo(user.id)
                 user_info = {
                     "id": user.id,
                     "first_name": getattr(user, "first_name", "Unknown"),
                     "last_name": getattr(user, "last_name", ""),
                     "username": getattr(user, "username", "No username"),
-                    "phone": getattr(user, "phone", "Hidden")
+                    "phone": getattr(user, "phone", "Hidden"),
+                    "profile_photo": profile_photo
                 }
                 users.append(user_info)
-        return {"users": users, "error": None}
+                count += 1
+            has_next = count >= limit
+            next_offset_id = offset + len(users) if has_next else None
+        return {"users": users, "next_offset_id": next_offset_id, "error": None}
     except ChatAdminRequiredError:
-        return {"users": [], "error": "Access to the user list is restricted. Administrative rights are required."}
+        return {"users": [], "next_offset_id": None, "error": "Access to the user list is restricted. Administrative rights are required."}
     except Exception as e:
-        print(f"Error fetching users: {e}")
-        return {"users": [], "error": f"Failed to fetch users: {str(e)}"}
-
+        logger.error(f"Error fetching users: {e}")
+        return {"users": [], "next_offset_id": None, "error": f"Failed to fetch users: {str(e)}"}
 
 # Helper: List all media files in a chat with full content
-async def get_chat_media(chat_id: int, limit: int = 20, offset: int = 0):
+async def get_chat_media(chat_id: int, limit: int = 20, offset_id: int = 0, thumbnail_only: bool = False):
     try:
         media_files = []
-        async for msg in client.iter_messages(chat_id, limit=limit, offset_id=offset, filter=None):
+        async for msg in client.iter_messages(chat_id, limit=limit + 1, offset_id=offset_id, filter=None):
             if msg.media:
                 sender = await msg.get_sender()
                 user_info = {
@@ -169,10 +203,8 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset: int = 0):
                 }
                 media_type = msg.media.__class__.__name__
                 media_data = {}
-
-                # Завантажуємо медіа
                 try:
-                    media_bytes = await client.download_media(msg.media, file=BytesIO())
+                    media_bytes = await client.download_media(msg.media, file=BytesIO(), thumb=thumbnail_only)
                     if media_type == "Photo":
                         media_data = {
                             "type": "image",
@@ -181,11 +213,10 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset: int = 0):
                             "mime_type": "image/jpeg"
                         }
                     elif media_type == "Document":
-                        # Перевіряємо, чи це відео
                         is_video = any(
                             isinstance(attr, DocumentAttributeVideo) for attr in msg.media.document.attributes)
                         filename = next((attr.file_name for attr in msg.media.document.attributes if
-                                         isinstance(attr, DocumentAttributeFilename)), "document")
+                                        isinstance(attr, DocumentAttributeFilename)), "document")
                         mime_type, _ = mimetypes.guess_type(filename)
                         if is_video:
                             media_data = {
@@ -209,14 +240,13 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset: int = 0):
                             "mime_type": None
                         }
                 except Exception as e:
-                    print(f"Error downloading media {msg.id}: {e}")
+                    logger.warning(f"Error downloading media {msg.id}: {e}")
                     media_data = {
                         "type": "error",
                         "base64": None,
                         "filename": None,
                         "mime_type": None
                     }
-
                 media_files.append({
                     "id": msg.id,
                     "type": media_type,
@@ -224,11 +254,13 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset: int = 0):
                     "date": msg.date,
                     "user": user_info
                 })
-        return media_files
+            if len(media_files) >= limit:
+                break
+        next_offset_id = media_files[-1]["id"] if media_files and len(media_files) == limit else None
+        return {"media_files": media_files[:limit], "next_offset_id": next_offset_id}
     except Exception as e:
-        print(f"Error fetching media: {e}")
+        logger.error(f"Error fetching media: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch media files")
-
 
 # Incoming message handler (logging group messages with user info)
 @client.on(NewMessage(incoming=True))
@@ -244,15 +276,13 @@ async def handle_message(event):
                 "username": getattr(sender, "username", "No username"),
                 "phone": getattr(sender, "phone", "Hidden")
             }
-            print(f"Group Message from {user_info} in {event.chat_id}: {text}")
-
+            logger.info(f"Group Message from {user_info} in {event.chat_id}: {text}")
 
 # Reset chat selection
 @app.get("/reset-chat", response_class=RedirectResponse)
 async def reset_chat(request: Request):
     request.session.pop("chat_id", None)
     return RedirectResponse(url="/", status_code=303)
-
 
 # Main chat UI with search and date filters for group chats
 @app.get("/", response_class=HTMLResponse)
@@ -262,19 +292,16 @@ async def form(
         query: str = None,
         start_date: str = None,
         end_date: str = None,
-        offset: int = Query(default=0, ge=0),
-        limit: int = Query(default=100, ge=1, le=200),
+        offset_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=10, ge=1, le=100),
         tab: str = Query(default="messages")
 ):
-    # Зберігаємо chat_id у сесії, якщо він переданий
     if chat_id is not None:
         request.session["chat_id"] = chat_id
-    # Якщо chat_id не переданий, беремо з сесії
     elif "chat_id" in request.session:
         chat_id = request.session["chat_id"]
 
     groups = await get_group_chats()
-    # Перевіряємо, чи збережений chat_id є валідним
     if chat_id is not None:
         valid_chat_ids = [group["id"] for group in groups]
         if chat_id not in valid_chat_ids:
@@ -282,16 +309,23 @@ async def form(
             chat_id = None
 
     messages = []
-    users_data = {"users": [], "error": None}
+    next_offset_id = offset_id
+    users_data = {"users": [], "next_offset_id": offset_id, "error": None}
     media_files = []
+    media_next_offset_id = offset_id
     if chat_id:
         if tab == "messages":
-            messages = await get_last_messages(chat_id, limit=limit, offset=offset, query=query, start_date=start_date,
-                                               end_date=end_date)
+            result = await get_last_messages(chat_id, limit=limit, offset_id=offset_id, query=query, start_date=start_date,
+                                            end_date=end_date)
+            messages = result["messages"]
+            next_offset_id = result["next_offset_id"]
         elif tab == "users":
-            users_data = await get_chat_users(chat_id, limit=limit, offset=offset)
+            users_data = await get_chat_users(chat_id, limit=limit, offset=offset_id)
+            next_offset_id = users_data["next_offset_id"]
         elif tab == "media":
-            media_files = await get_chat_media(chat_id, limit=20, offset=offset)
+            result = await get_chat_media(chat_id, limit=limit, offset_id=offset_id, thumbnail_only=True)
+            media_files = result["media_files"]
+            media_next_offset_id = result["next_offset_id"]
     return templates.TemplateResponse("index.html", {
         "request": request,
         "groups": groups,
@@ -303,6 +337,9 @@ async def form(
         "query": query,
         "start_date": start_date,
         "end_date": end_date,
-        "offset": offset,
+        "offset_id": offset_id,
+        "next_offset_id": next_offset_id,
+        "media_next_offset_id": media_next_offset_id,
+        "limit": limit,
         "tab": tab
     })
