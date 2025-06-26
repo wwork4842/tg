@@ -6,7 +6,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from telethon import TelegramClient
-from telethon.tl.types import Chat, Channel, DocumentAttributeVideo, DocumentAttributeFilename, MessageMediaPhoto
+from telethon.tl.types import Chat, Channel, DocumentAttributeVideo, DocumentAttributeFilename, MessageMediaPhoto, \
+    DocumentAttributeAudio, MessageMediaDocument
 from telethon.events import NewMessage
 from telethon.errors import SessionPasswordNeededError, ChatAdminRequiredError
 from telethon.tl.functions.channels import GetParticipantsRequest
@@ -17,6 +18,8 @@ import mimetypes
 import asyncio
 import logging
 import hashlib
+import glob
+import time
 
 # Configure logging to file
 logging.basicConfig(
@@ -82,6 +85,7 @@ async def startup_event():
                 logger.info("User not authorized, requesting code")
                 await client.send_code_request(PHONE_NUMBER)
                 raise HTTPException(status_code=307, detail="Redirect to /authorize")
+            clean_media_cache()  # Clean media cache on startup
             started = True
             logger.info("Telegram client initialized")
     except Exception as e:
@@ -111,8 +115,18 @@ async def authorize_form(request: Request):
     return templates.TemplateResponse("authorize.html", {"request": request})
 
 
+# Helper: Clean media cache
+def clean_media_cache():
+    logger.info("Cleaning media cache")
+    for f in glob.glob(f"{_media_cache_dir}/*.bin"):
+        if os.path.getmtime(f) < time.time() - 7 * 86400:
+            os.remove(f)
+            logger.debug(f"Removed old cache file {f}")
+
+
 # Helper: Download profile photo with caching
 async def download_profile_photo(user_id: int, semaphore: asyncio.Semaphore):
+    global _profile_photo_cache
     async with semaphore:
         cache_key = f"user_{user_id}"
         if cache_key in _profile_photo_cache:
@@ -125,10 +139,14 @@ async def download_profile_photo(user_id: int, semaphore: asyncio.Semaphore):
                 photo_data = f"data:image/jpeg;base64,{base64.b64encode(photo_file.getvalue()).decode('utf-8')}"
                 _profile_photo_cache[cache_key] = photo_data
                 logger.debug(f"Cached profile photo for user {user_id}")
-                return photo_data
-            _profile_photo_cache[cache_key] = None
-            logger.debug(f"No profile photo for user {user_id}")
-            return None
+            else:
+                _profile_photo_cache[cache_key] = None
+                logger.debug(f"No profile photo for user {user_id}")
+            # Clean cache if too large
+            if len(_profile_photo_cache) > 1000:
+                logger.info("Clearing profile photo cache")
+                _profile_photo_cache.clear()
+            return _profile_photo_cache[cache_key]
         except Exception as e:
             logger.warning(f"Error downloading profile photo for user {user_id}: {e}")
             _profile_photo_cache[cache_key] = None
@@ -147,6 +165,9 @@ async def download_media(message, thumbnail_only: bool = False):
             media_bytes = BytesIO(f.read())
     else:
         media_bytes = await client.download_media(message.media, file=BytesIO(), thumb=thumbnail_only)
+        if media_bytes.getbuffer().nbytes > 10 * 1024 * 1024:  # Limit to 10 MB
+            logger.warning(f"Media {media_id} too large, skipping")
+            raise ValueError("Media too large")
         with open(cache_file, "wb") as f:
             f.write(media_bytes.getvalue())
         logger.debug(f"Cached media {media_id} to disk")
@@ -160,7 +181,7 @@ async def get_last_messages(chat_id: int, limit: int = 10, offset_id: int = 0, q
     try:
         logger.info(f"Fetching messages for chat {chat_id} with limit {limit}, offset {offset_id}")
         messages = []
-        semaphore = asyncio.Semaphore(5)  # Limit concurrent downloads
+        semaphore = asyncio.Semaphore(3)  # Reduced to 3 for safety
         async for msg in client.iter_messages(chat_id, limit=limit, offset_id=offset_id):
             if msg.text or msg.media:
                 if query and query.lower() not in (msg.text or "").lower():
@@ -200,7 +221,7 @@ async def get_chat_users(chat_id: int, limit: int = 100, offset: int = 0):
     try:
         logger.info(f"Fetching users for chat {chat_id} with limit {limit}, offset {offset}")
         users = []
-        semaphore = asyncio.Semaphore(5)  # Limit concurrent downloads
+        semaphore = asyncio.Semaphore(3)  # Reduced to 3 for safety
         entity = await client.get_entity(chat_id)
         logger.debug(f"Entity type: {type(entity).__name__}")
         if isinstance(entity, Channel):
@@ -263,6 +284,7 @@ async def get_chat_users(chat_id: int, limit: int = 100, offset: int = 0):
 async def get_chat_media(chat_id: int, limit: int = 20, offset_id: int = 0, thumbnail_only: bool = True):
     try:
         logger.info(f"Fetching media for chat {chat_id} with limit {limit}, offset {offset_id}")
+        clean_media_cache()  # Clean old media files
         media_files = []
         async for msg in client.iter_messages(chat_id, limit=limit + 1, offset_id=offset_id, filter=None):
             if msg.media:
@@ -286,9 +308,11 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset_id: int = 0, thum
                             "filename": None,
                             "mime_type": "image/jpeg"
                         }
-                    elif media_type == "Document":
+                    elif isinstance(msg.media, MessageMediaDocument):
                         is_video = any(
                             isinstance(attr, DocumentAttributeVideo) for attr in msg.media.document.attributes)
+                        is_audio = any(
+                            isinstance(attr, DocumentAttributeAudio) for attr in msg.media.document.attributes)
                         filename = next((attr.file_name for attr in msg.media.document.attributes if
                                          isinstance(attr, DocumentAttributeFilename)), "document")
                         mime_type, _ = mimetypes.guess_type(filename)
@@ -298,6 +322,13 @@ async def get_chat_media(chat_id: int, limit: int = 20, offset_id: int = 0, thum
                                 "base64": f"data:video/mp4;base64,{base64.b64encode(media_bytes.getvalue()).decode('utf-8')}",
                                 "filename": None,
                                 "mime_type": "video/mp4"
+                            }
+                        elif is_audio:
+                            media_data = {
+                                "type": "audio",
+                                "base64": f"data:audio/mpeg;base64,{base64.b64encode(media_bytes.getvalue()).decode('utf-8')}",
+                                "filename": filename,
+                                "mime_type": "audio/mpeg"
                             }
                         else:
                             media_data = {

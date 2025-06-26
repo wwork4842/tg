@@ -4,29 +4,29 @@
     <meta charset="UTF-8">
     <title>Telegram Group Messages</title>
     <style>
-        body { background-color: #1a1a1a; color: #fff; font-family: Arial, sans-serif; }
+        body { background: #1a1a1a; color: #fff; font-family: Arial, sans-serif; }
         .container { max-width: 1000px; margin: 20px auto; }
-        .message, .user, .media { background-color: #2a2a2a; padding: 10px; margin: 5px 0; border-radius: 5px; }
+        .message, .user, .media { background: #2a2a2a; padding: 10px; margin: 5px 0; border-radius: 5px; }
         .message, .user { display: flex; flex-direction: column; align-items: flex-start; }
         .message img, .user img { object-fit: cover; width: 50px; height: 50px; border-radius: 50%; margin-right: 10px; float: left; }
         .user-info { margin-top: 10px; font-size: 0.9em; color: #ccc; }
         .search-bar { display: flex; gap: 10px; margin-bottom: 20px; }
         input, select, button { padding: 10px; border: none; border-radius: 5px; }
-        button { background-color: #1e90ff; color: #fff; cursor: pointer; }
+        button { background: #1e90ff; color: #fff; cursor: pointer; }
         .pagination { margin-top: 10px; }
         .pagination a { color: #1e90ff; margin: 0 10px; text-decoration: none; }
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
-        .tab { padding: 10px 20px; background-color: #2a2a2a; border-radius: 5px; cursor: pointer; }
-        .tab.active { background-color: #1e90ff; }
+        .tab { padding: 10px 20px; background: #2a2a2a; border-radius: 5px; cursor: pointer; }
+        .tab.active { background: #1e90ff; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .error, .empty { color: #ff5555; font-weight: bold; }
-        .media img, .media video { max-width: 300px; max-height: 300px; object-fit: contain; cursor: pointer; }
+        .media img, .media video, .media audio { max-width: 300px; max-height: 300px; object-fit: contain; cursor: pointer; }
         .media a { color: #1e90ff; text-decoration: none; }
-        .reset-chat { background-color: #ff5555; margin-left: 10px; }
-        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.9); }
+        .reset-chat { background: #ff5555; margin-left: 10px; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); }
         .modal-content { margin: auto; display: block; max-width: 90%; max-height: 90%; }
-        .modal-content img, .modal-content video { width: auto; height: auto; max-width: 100%; max-height: 90vh; }
+        .modal-content img, .modal-content video, .modal-content audio { width: auto; height: auto; max-width: 100%; max-height: 90vh; }
         .modal-content iframe { width: 90%; height: 90vh; border: none; }
         .close { position: absolute; top: 20px; right: 40px; color: #fff; font-size: 40px; cursor: pointer; }
     </style>
@@ -68,7 +68,7 @@
                         {% if msg.user.profile_photo %}
                             <img src="{{ msg.user.profile_photo }}" alt="Profile Photo">
                         {% else %}
-                            <div style="width: 50px; height: 50px; border-radius: 50%; background-color: #ccc; margin-right: 10px; float: left;"></div>
+                            <div style="width: 50px; height: 50px; border-radius: 50%; background: #ccc; margin-right: 10px; float: left;"></div>
                         {% endif %}
                         <p>{{ msg.content }}</p>
                         <div class="user-info">
@@ -103,7 +103,7 @@
                         {% if user.profile_photo %}
                             <img src="{{ user.profile_photo }}" alt="Profile Photo">
                         {% else %}
-                            <div style="width: 50px; height: 50px; border-radius: 50%; background-color: #ccc; margin-right: 10px; float: left;"></div>
+                            <div style="width: 50px; height: 50px; border-radius: 50%; background: #ccc; margin-right: 10px; float: left;"></div>
                         {% endif %}
                         <div class="user-info">
                             <strong>ID:</strong> {{ user['id'] }}<br>
@@ -139,13 +139,18 @@
                                 <source src="{{ media.media_data.base64 }}" type="video/mp4">
                                 Your browser does not support the video tag.
                             </video>
+                        {% elif media.media_data.type == "audio" %}
+                            <audio controls>
+                                <source src="{{ media.media_data.base64 }}" type="audio/mpeg">
+                                Your browser does not support the audio tag.
+                            </audio>
                         {% elif media.media_data.type == "document" %}
                             {% if media.media_data.mime_type == "application/pdf" %}
                                 <a href="#" onclick="openModal('pdf', '{{ media.media_data.base64 }}')">View {{ media.media_data.filename }}</a> |
                             {% endif %}
                             <a href="{{ media.media_data.base64 }}" download="{{ media.media_data.filename }}">Download {{ media.media_data.filename }}</a>
                         {% elif media.media_data.type == "unsupported" %}
-                            <p class="error">Unsupported media type</p>
+                            <p class="error">Unsupported media type: {{ media.type }}</p>
                         {% elif media.media_data.type == "error" %}
                             <p class="error">Failed to load media</p>
                         {% endif %}
@@ -197,6 +202,11 @@
                 video.controls = true;
                 video.src = src;
                 modalContent.appendChild(video);
+            } else if (type === 'audio') {
+                const audio = document.createElement('audio');
+                audio.controls = true;
+                audio.src = src;
+                modalContent.appendChild(audio);
             } else if (type === 'pdf') {
                 const iframe = document.createElement('iframe');
                 iframe.src = src;
