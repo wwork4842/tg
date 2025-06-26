@@ -20,7 +20,7 @@
         .tab.active { background-color: #1e90ff; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-        .error { color: #ff5555; font-weight: bold; }
+        .error, .empty { color: #ff5555; font-weight: bold; }
         .media img, .media video { max-width: 300px; max-height: 300px; object-fit: contain; cursor: pointer; }
         .media a { color: #1e90ff; text-decoration: none; }
         .reset-chat { background-color: #ff5555; margin-left: 10px; }
@@ -60,24 +60,28 @@
             <div class="tab {% if tab == 'media' %}active{% endif %}" onclick="showTab('media')">Media</div>
         </div>
         <div id="messages" class="tab-content {% if tab == 'messages' %}active{% endif %}">
-            {% for msg in messages %}
-                <div class="message">
-                    {% if msg.user.profile_photo %}
-                        <img src="{{ msg.user.profile_photo }}" alt="Profile Photo">
-                    {% else %}
-                        <div style="width: 50px; height: 50px; border-radius: 50%; background-color: #ccc; margin-right: 10px; float: left;"></div>
-                    {% endif %}
-                    <p>{{ msg.content }}</p>
-                    <div class="user-info">
-                        <strong>ID:</strong> {{ msg.user['id'] }}<br>
-                        <strong>Name:</strong> {{ msg.user['first_name'] }} {{ msg.user['last_name'] }}<br>
-                        <strong>Username:</strong> @{{ msg.user['username'] }}<br>
-                        <strong>Phone:</strong> {{ msg.user['phone'] }}<br>
+            {% if messages|length == 0 %}
+                <p class="empty">No messages found</p>
+            {% else %}
+                {% for msg in messages %}
+                    <div class="message">
+                        {% if msg.user.profile_photo %}
+                            <img src="{{ msg.user.profile_photo }}" alt="Profile Photo">
+                        {% else %}
+                            <div style="width: 50px; height: 50px; border-radius: 50%; background-color: #ccc; margin-right: 10px; float: left;"></div>
+                        {% endif %}
+                        <p>{{ msg.content }}</p>
+                        <div class="user-info">
+                            <strong>ID:</strong> {{ msg.user['id'] }}<br>
+                            <strong>Name:</strong> {{ msg.user['first_name'] }} {{ msg.user['last_name'] }}<br>
+                            <strong>Username:</strong> @{{ msg.user['username'] }}<br>
+                            <strong>Phone:</strong> {{ msg.user['phone'] }}<br>
+                        </div>
+                        <small>{{ msg.date.strftime('%Y-%m-%d %H:%M:%S') }}</small>
+                        <div style="clear: both;"></div>
                     </div>
-                    <small>{{ msg.date.strftime('%Y-%m-%d %H:%M:%S') }}</small>
-                    <div style="clear: both;"></div>
-                </div>
-            {% endfor %}
+                {% endfor %}
+            {% endif %}
             <div class="pagination">
                 {% if offset_id > 0 %}
                     <a href="/?chat_id={{ active_chat }}&query={{ query or '' }}&start_date={{ start_date or '' }}&end_date={{ end_date or '' }}&offset_id=0&limit={{ limit }}&tab=messages">First</a>
@@ -91,6 +95,8 @@
         <div id="users" class="tab-content {% if tab == 'users' %}active{% endif %}">
             {% if users_error %}
                 <p class="error">{{ users_error }}</p>
+            {% elif users|length == 0 %}
+                <p class="empty">No users found in this chat</p>
             {% else %}
                 {% for user in users %}
                     <div class="user">
@@ -108,47 +114,51 @@
                         <div style="clear: both;"></div>
                     </div>
                 {% endfor %}
-                <div class="pagination">
-                    {% if offset_id > 0 %}
-                        <a href="/?chat_id={{ active_chat }}&offset_id=0&tab=users&limit={{ limit }}">First</a>
-                        <a href="/?chat_id={{ active_chat }}&offset_id={{ offset_id - limit }}&tab=users&limit={{ limit }}">Previous</a>
-                    {% endif %}
-                    {% if next_offset_id %}
-                        <a href="/?chat_id={{ active_chat }}&offset_id={{ next_offset_id }}&tab=users&limit={{ limit }}">Next</a>
-                    {% endif %}
-                </div>
             {% endif %}
+            <div class="pagination">
+                {% if offset_id > 0 %}
+                    <a href="/?chat_id={{ active_chat }}&offset_id=0&tab=users&limit={{ limit }}">First</a>
+                    <a href="/?chat_id={{ active_chat }}&offset_id={{ offset_id - limit }}&tab=users&limit={{ limit }}">Previous</a>
+                {% endif %}
+                {% if next_offset_id %}
+                    <a href="/?chat_id={{ active_chat }}&offset_id={{ next_offset_id }}&tab=users&limit={{ limit }}">Next</a>
+                {% endif %}
+            </div>
         </div>
         <div id="media" class="tab-content {% if tab == 'media' %}active{% endif %}">
-            {% for media in media_files %}
-                <div class="media">
-                    <p><strong>Type:</strong> {{ media.type }}</p>
-                    {% if media.media_data.type == "image" %}
-                        <img src="{{ media.media_data.base64 }}" alt="Image" onclick="openModal('image', '{{ media.media_data.base64 }}')">
-                    {% elif media.media_data.type == "video" %}
-                        <video controls onclick="openModal('video', '{{ media.media_data.base64 }}')">
-                            <source src="{{ media.media_data.base64 }}" type="video/mp4">
-                            Your browser does not support the video tag.
-                        </video>
-                    {% elif media.media_data.type == "document" %}
-                        {% if media.media_data.mime_type == "application/pdf" %}
-                            <a href="#" onclick="openModal('pdf', '{{ media.media_data.base64 }}')">View {{ media.media_data.filename }}</a> |
+            {% if media_files|length == 0 %}
+                <p class="empty">No media found in this chat</p>
+            {% else %}
+                {% for media in media_files %}
+                    <div class="media">
+                        <p><strong>Type:</strong> {{ media.type }}</p>
+                        {% if media.media_data.type == "image" %}
+                            <img src="{{ media.media_data.base64 }}" alt="Image" onclick="openModal('image', '{{ media.media_data.base64 }}')">
+                        {% elif media.media_data.type == "video" %}
+                            <video controls onclick="openModal('video', '{{ media.media_data.base64 }}')">
+                                <source src="{{ media.media_data.base64 }}" type="video/mp4">
+                                Your browser does not support the video tag.
+                            </video>
+                        {% elif media.media_data.type == "document" %}
+                            {% if media.media_data.mime_type == "application/pdf" %}
+                                <a href="#" onclick="openModal('pdf', '{{ media.media_data.base64 }}')">View {{ media.media_data.filename }}</a> |
+                            {% endif %}
+                            <a href="{{ media.media_data.base64 }}" download="{{ media.media_data.filename }}">Download {{ media.media_data.filename }}</a>
+                        {% elif media.media_data.type == "unsupported" %}
+                            <p class="error">Unsupported media type</p>
+                        {% elif media.media_data.type == "error" %}
+                            <p class="error">Failed to load media</p>
                         {% endif %}
-                        <a href="{{ media.media_data.base64 }}" download="{{ media.media_data.filename }}">Download {{ media.media_data.filename }}</a>
-                    {% elif media.media_data.type == "unsupported" %}
-                        <p class="error">Unsupported media type</p>
-                    {% elif media.media_data.type == "error" %}
-                        <p class="error">Failed to load media</p>
-                    {% endif %}
-                    <div class="user-info">
-                        <strong>ID:</strong> {{ media.user['id'] }}<br>
-                        <strong>Name:</strong> {{ media.user['first_name'] }} {{ media.user['last_name'] }}<br>
-                        <strong>Username:</strong> @{{ media.user['username'] }}<br>
-                        <strong>Phone:</strong> {{ media.user['phone'] }}<br>
+                        <div class="user-info">
+                            <strong>ID:</strong> {{ media.user['id'] }}<br>
+                            <strong>Name:</strong> {{ media.user['first_name'] }} {{ media.user['last_name'] }}<br>
+                            <strong>Username:</strong> @{{ media.user['username'] }}<br>
+                            <strong>Phone:</strong> {{ media.user['phone'] }}<br>
+                        </div>
+                        <small>{{ media.date.strftime('%Y-%m-%d %H:%M:%S') }}</small>
                     </div>
-                    <small>{{ media.date.strftime('%Y-%m-%d %H:%M:%S') }}</small>
-                </div>
-            {% endfor %}
+                {% endfor %}
+            {% endif %}
             <div class="pagination">
                 {% if offset_id > 0 %}
                     <a href="/?chat_id={{ active_chat }}&offset_id=0&tab=media&limit={{ limit }}">First</a>
